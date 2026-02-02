@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:expressions/expressions.dart';
+import 'dart:math';
 
 void main() {
   runApp(const CalculatorApp());
@@ -89,21 +90,31 @@ class _CalculatorPageState extends State<CalculatorPage> {
   setState(() {
     final sanitized = _sanitizeForEval(_input);
     if (sanitized.trim().isEmpty) return;
-
     try {
-      final exp = Expression.parse(sanitized);
-      final eval = _evaluator.eval(exp, {});
-
-      if (eval is double) {
-        if (eval.isInfinite || eval.isNaN) {
+      if (sanitized.contains('%')) {
+        final value = _evaluateWithModulo(sanitized);
+        if (value == null || value.isInfinite || value.isNaN) {
           _result = 'Error';
-        } else if (eval == eval.roundToDouble()) {
-          _result = eval.toInt().toString();
+        } else if (value == value.roundToDouble()) {
+          _result = value.toInt().toString();
+        } else {
+          _result = value.toString();
+        }
+      } else {
+        final exp = Expression.parse(sanitized);
+        final eval = _evaluator.eval(exp, {});
+
+        if (eval is double) {
+          if (eval.isInfinite || eval.isNaN) {
+            _result = 'Error';
+          } else if (eval == eval.roundToDouble()) {
+            _result = eval.toInt().toString();
+          } else {
+            _result = eval.toString();
+          }
         } else {
           _result = eval.toString();
         }
-      } else {
-        _result = eval.toString();
       }
 
       _expression = _result;
@@ -117,11 +128,11 @@ class _CalculatorPageState extends State<CalculatorPage> {
 
   String _sanitizeForEval(String s) {
     // Replace common symbols with programmatic ones
-    return s.replaceAll('×', '*').replaceAll('÷', '/').replaceAll('×', '*');
+    return s.replaceAll('×', '*').replaceAll('÷', '/').replaceAll('\u00B2', '^2');
   }
 
   bool _isOperator(String token) {
-    const ops = ['+', '-', '×', '÷', '*', '/', '^'];
+    const ops = ['+', '-', '×', '÷', '*', '/', '^', '%'];
     return ops.contains(token);
   }
 
@@ -206,8 +217,8 @@ class _CalculatorPageState extends State<CalculatorPage> {
                         children: [
                           Expanded(child: _buildButton('C', color: Colors.redAccent, onTap: _clearAll)),
                           Expanded(child: _buildButton('⌫', color: Colors.orangeAccent, onTap: _backspace)),
-                          Expanded(child: _buildButton('(', color: Colors.blueGrey)),
-                          Expanded(child: _buildButton(')', color: Colors.blueGrey)),
+                              Expanded(child: _buildButton('x²', color: Colors.blueGrey, onTap: _squareLastNumber)),
+                              Expanded(child: _buildButton(')', color: Colors.blueGrey)),
                         ],
                       ),
                     ),
@@ -246,7 +257,7 @@ class _CalculatorPageState extends State<CalculatorPage> {
                         children: [
                           Expanded(child: _buildButton('0')),
                           Expanded(child: _buildButton('.')),
-                          Expanded(child: _buildButton('%', color: Colors.blueGrey, onTap: () => _append('/100'))),
+                          Expanded(child: _buildButton('%', color: Colors.blueGrey, onTap: () => _append('%'))),
                           Expanded(child: _buildButton('+', color: Colors.deepPurpleAccent)),
                         ],
                       ),
@@ -302,7 +313,7 @@ class _CalculatorPageState extends State<CalculatorPage> {
     // flip the sign of the last number in the expression
     if (_expression.isEmpty) return;
     // find last number token
-    final regex = RegExp(r'(-?\d*\.?\d+)\$');
+    final regex = RegExp(r'(-?\d*\.?\d+)$');
     final match = regex.firstMatch(_expression);
     if (match != null) {
       final numStr = match.group(1)!;
@@ -313,5 +324,138 @@ class _CalculatorPageState extends State<CalculatorPage> {
       }
       _input = _expression;
     }
+  }
+
+void _squareLastNumber() {
+  if (_expression.isEmpty) return;
+  final regex = RegExp(r'(-?\d*\.?\d*)$');  // Better regex match
+  final match = regex.firstMatch(_expression);
+  if (match != null) {
+    final numStr = match.group(1)!;
+    final sanitized = _sanitizeForEval('($numStr)^2');
+    try {
+      final exp = Expression.parse(sanitized);
+      final result = _evaluator.eval(exp, {});
+      
+      setState(() {
+        if (result is double && !result.isNaN && !result.isInfinite) {
+          _expression = result == result.roundToDouble() 
+            ? result.toInt().toString() 
+            : result.toString();
+          _input = _expression;
+          _result = '= $_expression';  // Show result immediately
+        } else {
+          _result = 'Error';
+        }
+      });
+    } catch (e) {
+      setState(() { _result = 'Error'; });
+    }
+  }
+}
+
+
+  double? _evaluateWithModulo(String s) {
+    try {
+      final tokens = _tokenize(s);
+      final rpn = _toRPN(tokens);
+      return _evalRPN(rpn);
+    } catch (e) {
+      return double.nan;
+    }
+  }
+
+  List<String> _tokenize(String s) {
+    final pattern = RegExp(r'(\d*\.\d+|\d+|[+\-*/^%()])');
+    final matches = pattern.allMatches(s);
+    final raw = matches.map((m) => m.group(0)!).toList();
+    // handle unary minus by merging with next number
+    final out = <String>[];
+    for (var i = 0; i < raw.length; i++) {
+      final t = raw[i];
+      if (t == '-' && (i == 0 || ['+', '-', '*', '/', '^', '%', '('].contains(raw[i - 1])) && i + 1 < raw.length && RegExp(r'^\d*\.?\d+$').hasMatch(raw[i + 1])) {
+        out.add('-' + raw[i + 1]);
+        i++; // skip next
+      } else {
+        out.add(t);
+      }
+    }
+    return out;
+  }
+
+  List<String> _toRPN(List<String> tokens) {
+    final out = <String>[];
+    final ops = <String>[];
+    final prec = {'+': 2, '-': 2, '*': 3, '/': 3, '%': 3, '^': 4};
+    final rightAssoc = {'^'};
+
+    for (final token in tokens) {
+      if (RegExp(r'^-?\d*\.?\d+$').hasMatch(token)) {
+        out.add(token);
+      } else if (['+', '-', '*', '/', '%', '^'].contains(token)) {
+        while (ops.isNotEmpty && ops.last != '(') {
+          final last = ops.last;
+          final p1 = prec[last] ?? 0;
+          final p2 = prec[token] ?? 0;
+          if ((rightAssoc.contains(token) && p2 < p1) || (!rightAssoc.contains(token) && p2 <= p1)) {
+            out.add(ops.removeLast());
+          } else {
+            break;
+          }
+        }
+        ops.add(token);
+      } else if (token == '(') {
+        ops.add(token);
+      } else if (token == ')') {
+        while (ops.isNotEmpty && ops.last != '(') {
+          out.add(ops.removeLast());
+        }
+        if (ops.isNotEmpty && ops.last == '(') ops.removeLast();
+      }
+    }
+
+    while (ops.isNotEmpty) out.add(ops.removeLast());
+    return out;
+  }
+
+  double _evalRPN(List<String> rpn) {
+    final stack = <double>[];
+    for (final token in rpn) {
+      if (RegExp(r'^-?\d*\.?\d+$').hasMatch(token)) {
+        stack.add(double.parse(token));
+      } else {
+        if (stack.length < 2) throw Exception('Invalid expression');
+        final b = stack.removeLast();
+        final a = stack.removeLast();
+        double res;
+        switch (token) {
+          case '+':
+            res = a + b;
+            break;
+          case '-':
+            res = a - b;
+            break;
+          case '*':
+            res = a * b;
+            break;
+          case '/':
+            if (b == 0) throw Exception('Division by zero');
+            res = a / b;
+            break;
+          case '%':
+            if (b == 0) throw Exception('Division by zero');
+            res = a.remainder(b);
+            break;
+          case '^':
+            res = pow(a, b).toDouble();
+            break;
+          default:
+            throw Exception('Unknown operator');
+        }
+        stack.add(res);
+      }
+    }
+    if (stack.length != 1) throw Exception('Invalid RPN');
+    return stack.single;
   }
 }
